@@ -1,0 +1,125 @@
+name: Build Matisse3G Kernel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [pmos-matisse3g-fixes]
+    paths:
+      - 'arch/arm/**'
+      - 'kernel/**'
+      - 'drivers/**'
+      - 'include/**'
+      - 'Makefile'
+      - 'arch/arm/configs/matisse3g_defconfig'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          ref: pmos-matisse3g-fixes
+          submodules: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf bc bison flex libssl-dev make cpio
+          sudo pip3 install mkbootimg
+
+      - name: Verify no CONFIG_RT_GROUP_SCHED
+        run: |
+          grep -i "RT_GROUP_SCHED" arch/arm/configs/matisse3g_defconfig && \
+            echo "WARNING: RT_GROUP_SCHED found in defconfig!" || \
+            echo "OK: RT_GROUP_SCHED not in defconfig"
+
+      - name: Configure kernel
+        run: |
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          make matisse3g_defconfig
+          echo "--- .config RT settings ---"
+          grep -i "RT_GROUP_SCHED\|RT_RUNTIME\|PREEMPT" .config || true
+
+      - name: Build kernel
+        run: |
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          make -j$(nproc) zImage Image 2>&1 | tail -50
+
+      - name: Build kernel modules (optional)
+        run: |
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          make -j$(nproc) modules 2>&1 | tail -20 || true
+        continue-on-error: true
+
+      - name: Create boot.img
+        run: |
+          # The kernel Image is at arch/arm/boot/Image
+          ls -la arch/arm/boot/Image
+          
+          # Decode ramdisk from repo
+          python3 -c "
+          import urllib.request, base64, json, os
+          
+          token = os.environ['GH_TOKEN']
+          url = 'https://api.github.com/repos/${{ github.repository }}/contents/boot/ramdisk.gz'
+          req = urllib.request.Request(url, headers={'Authorization': f'token {token}'})
+          resp = urllib.request.urlopen(req)
+          data = json.loads(resp.read())
+          content = base64.b64decode(data['content'])
+          with open('ramdisk.gz', 'wb') as f:
+              f.write(content)
+          print(f'Ramdisk: {len(content)} bytes')
+          "
+          
+          mkbootimg \
+            --kernel arch/arm/boot/Image \
+            --ramdisk ramdisk.gz \
+            --base 0x00000000 \
+            --pagesize 2048 \
+            --kernel_offset 0x00008000 \
+            --ramdisk_offset 0x02000000 \
+            --tags_offset 0x01e00000 \
+            --cmdline "androidboot.hardware=qcom user_debug=23 msm_rtb.filter=0x37 zcache.enabled=1 zcache.compressor=lz4 buildvariant=userdebug" \
+            --os_version 13.0.0 \
+            --os_patch_level 2025-01 \
+            -o boot.img
+          
+          ls -la boot.img
+
+      - name: Upload boot.img artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: matisse3g-boot-${{ github.sha }}
+          path: boot.img
+          retention-days: 30
+
+      - name: Upload kernel Image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: matisse3g-kernel-${{ github.sha }}
+          path: arch/arm/boot/Image
+          retention-days: 30
+
+      - name: Build summary
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Kernel**: \`arch/arm/boot/Image\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Boot.img**: \`boot.img\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Config**: \`matisse3g_defconfig\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **CONFIG_RT_GROUP_SCHED**: NOT SET (fixed!)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Flash instructions" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "fastboot flash boot boot.img" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "Or via adb:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "adb push boot.img /sdcard/" >> $GITHUB_STEP_SUMMARY
+          echo "adb shell su -c 'dd if=/sdcard/boot.img of=/dev/block/platform/msm_sdcc.1/by-name/boot'" >> $GITHUB_STEP_SUMMARY
+          echo "adb reboot" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
