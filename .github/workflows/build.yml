@@ -18,20 +18,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-arm-linux-gnueabihf bc bison flex libssl-dev make cpio python3
 
-      - name: Patch kernel for modern GCC
+      - name: Patch Makefile for modern GCC
         run: |
           sed -i 's/-Werror-implicit-function-declaration/-Wno-implicit-function-declaration/g' Makefile
-          echo "Patched Makefile: -Werror-implicit-function-declaration -> -Wno-implicit-function-declaration"
           sed -i 's/-Werror=implicit-function-declaration/-Wno-implicit-function-declaration/g' Makefile
-          echo "Patched Makefile: -Werror=implicit-function-declaration -> -Wno-implicit-function-declaration"
+          echo "Makefile patched:"
+          grep -n 'implicit-function-declaration' Makefile
 
-      - name: Verify no CONFIG_RT_GROUP_SCHED in defconfig
+      - name: Disable CONFIG_RT_GROUP_SCHED in defconfig
         run: |
-          echo "=== msm8226-sec_defconfig ==="
-          grep -n "RT_GROUP_SCHED" arch/arm/configs/msm8226-sec_defconfig || echo "not found"
+          echo "Before patch:"
+          grep -n 'RT_GROUP_SCHED' arch/arm/configs/msm8226-sec_defconfig
+          sed -i 's/^CONFIG_RT_GROUP_SCHED=y/# CONFIG_RT_GROUP_SCHED is not set/' \
+            arch/arm/configs/msm8226-sec_defconfig
           echo ""
-          echo "=== matisse3g_defconfig ==="
-          grep -n "RT_GROUP_SCHED" arch/arm/configs/matisse3g_defconfig || echo "not found"
+          echo "After patch:"
+          grep -n 'RT_GROUP_SCHED' arch/arm/configs/msm8226-sec_defconfig
 
       - name: Configure kernel
         run: |
@@ -40,18 +42,12 @@ jobs:
           make msm8226-sec_defconfig \
             VARIANT_DEFCONFIG=msm8228-sec_atlantic3geur_defconfig \
             SELINUX_DEFCONFIG=selinux_defconfig
-          echo "=== CONFIG_RT_GROUP_SCHED in .config ==="
-          grep "RT_GROUP_SCHED" .config || echo "not found (good!)"
           echo ""
-          echo "=== Key configs ==="
-          grep -E 'CONFIG_ARCH_MSM8226|CONFIG_MSM_SMD|CONFIG_SND|CONFIG_BT' .config | head -20
-
-      - name: Disable RT_GROUP_SCHED in .config
-        run: |
-          sed -i 's/CONFIG_RT_GROUP_SCHED=y/# CONFIG_RT_GROUP_SCHED is not set/' .config
-          echo "After patch:"
-          grep "RT_GROUP_SCHED" .config || echo "RT_GROUP_SCHED disabled"
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- olddefconfig
+          echo "=== Verify RT_GROUP_SCHED in .config ==="
+          grep 'RT_GROUP_SCHED' .config || echo "RT_GROUP_SCHED not set (good!)"
+          echo ""
+          echo "=== Verify CONFIG_OF in .config ==="
+          grep -E '^CONFIG_OF[= ]' .config || echo "WARNING: CONFIG_OF not set!"
 
       - name: Build kernel
         run: |
@@ -61,14 +57,13 @@ jobs:
           BUILDRC=${PIPESTATUS[0]}
           echo "Build exit code: $BUILDRC"
           if [ "$BUILDRC" -ne 0 ]; then
-            echo "=== ERRORS ==="
+            echo "=== Last errors ==="
             grep -i 'error:' /tmp/build.log | grep -v '.gitignore' | tail -20
             exit 1
           fi
 
       - name: Verify kernel image
         run: |
-          echo "=== Check for kernel image ==="
           if [ -f arch/arm/boot/zImage ]; then
             echo "Found zImage: $(wc -c < arch/arm/boot/zImage) bytes"
           elif [ -f arch/arm/boot/Image ]; then
