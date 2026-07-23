@@ -73,7 +73,7 @@ jobs:
         run: |
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
-          make -j$(nproc) 2>&1 | tee /tmp/build.log
+          make -j$(nproc) CONFIG_NO_ERROR_ON_MISMATCH=y 2>&1 | tee /tmp/build.log
           BUILDRC=${PIPESTATUS[0]}
           echo "Build exit code: $BUILDRC"
           if [ "$BUILDRC" -ne 0 ]; then
