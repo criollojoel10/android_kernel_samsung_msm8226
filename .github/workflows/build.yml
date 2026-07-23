@@ -112,12 +112,15 @@ jobs:
             exit 1
           fi
 
-      - name: Create boot.img
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create boot.img (template-based)
         run: |
           python3 << 'PYEOF2'
-          import struct, os, urllib.request, base64, json
+          import struct, math, os
+
+          TEMPLATE = 'boot/original-boot.img'
+
+          with open(TEMPLATE, 'rb') as f:
+              orig = f.read()
 
           if os.path.exists('arch/arm/boot/zImage'):
               kernel_path = 'arch/arm/boot/zImage'
@@ -125,55 +128,37 @@ jobs:
               kernel_path = 'arch/arm/boot/Image'
 
           with open(kernel_path, 'rb') as f:
-              kernel = f.read()
-          print(f'Kernel: {len(kernel)} bytes')
+              new_kernel = f.read()
 
-          token = os.environ['GH_TOKEN']
-          repo_url = os.environ.get('GITHUB_REPOSITORY', 'criollojoel10/android_kernel_samsung_msm8226')
-          url = f'https://api.github.com/repos/{repo_url}/contents/boot/ramdisk.gz'
-          req = urllib.request.Request(url, headers={'Authorization': f'token {token}'})
-          resp = urllib.request.urlopen(req)
-          data = json.loads(resp.read())
-          ramdisk = base64.b64decode(data['content'])
-          print(f'Ramdisk: {len(ramdisk)} bytes')
+          page = 2048
+          kernel_size_orig = struct.unpack('<I', orig[8:12])[0]
+          ramdisk_size_orig = struct.unpack('<I', orig[16:20])[0]
+          ramdisk_padded = math.ceil(ramdisk_size_orig / page) * page
+          new_kernel_padded = math.ceil(len(new_kernel) / page) * page
 
-          page_size = 2048
-          base_addr = 0x00000000
-          kernel_offset = 0x00008000
-          ramdisk_offset = 0x02000000
-          tags_offset = 0x01e00000
-          cmdline = b'androidboot.hardware=qcom user_debug=23 msm_rtb.filter=0x37 zcache.enabled=1 zcache.compressor=lz4 buildvariant=userdebug'
+          orig_ramdisk_start = page + math.ceil(kernel_size_orig / page) * page
+          orig_qcdt_start = orig_ramdisk_start + ramdisk_padded
 
-          def pad(value):
-              return (value + page_size - 1) & ~(page_size - 1)
+          ramdisk_data = orig[orig_ramdisk_start:orig_ramdisk_start + ramdisk_size_orig]
+          qcdt_and_rest = orig[orig_qcdt_start:]
 
-          kernel_padded = pad(len(kernel))
-          ramdisk_padded = pad(len(ramdisk))
+          new_boot = bytearray()
+          header = bytearray(orig[:page])
+          header[8:12] = struct.pack('<I', len(new_kernel))
+          new_boot += header
+          new_boot += new_kernel + b'\x00' * (new_kernel_padded - len(new_kernel))
+          new_boot += ramdisk_data + b'\x00' * (ramdisk_padded - len(ramdisk_data))
+          new_boot += qcdt_and_rest
 
-          header = bytearray(page_size)
-          header[0:8] = b'ANDROID!'
-          struct.pack_into('<I', header, 8, len(kernel))
-          struct.pack_into('<I', header, 12, base_addr + kernel_offset)
-          struct.pack_into('<I', header, 16, len(ramdisk))
-          struct.pack_into('<I', header, 20, base_addr + ramdisk_offset)
-          struct.pack_into('<I', header, 24, 0)
-          struct.pack_into('<I', header, 28, 0)
-          struct.pack_into('<I', header, 32, base_addr + tags_offset)
-          struct.pack_into('<I', header, 36, page_size)
-          struct.pack_into('<I', header, 40, 0)
-          struct.pack_into('<I', header, 44, 0)
-          header[48:64] = b'SM-T531\x00'
-          header[64:64+len(cmdline)] = cmdline
+          with open('boot.img', 'wb') as f:
+              f.write(new_boot)
 
-          with open('boot.img', 'wb') as out:
-              out.write(header)
-              out.write(kernel)
-              out.write(b'\x00' * (kernel_padded - len(kernel)))
-              out.write(ramdisk)
-              out.write(b'\x00' * (ramdisk_padded - len(ramdisk)))
-
-          total = page_size + kernel_padded + ramdisk_padded
-          print(f'boot.img: {total} bytes ({total // 1024} KB)')
+          print(f'New kernel: {len(new_kernel)} bytes')
+          print(f'Original ramdisk: {ramdisk_size_orig} bytes')
+          print(f'QCDT+tail: {len(qcdt_and_rest)} bytes')
+          print(f'boot.img: {len(new_boot)} bytes ({len(new_boot) // 1024} KB)')
+          print(f'QCDT magic: {bytes(new_boot[page + new_kernel_padded + ramdisk_padded:page + new_kernel_padded + ramdisk_padded + 4])}')
+          print(f'Last 16: {bytes(new_boot[-16:])}')
           PYEOF2
 
           ls -la boot.img
@@ -198,12 +183,21 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Kernel**: matisse3g (ARM32, Snapdragon 400)" >> $GITHUB_STEP_SUMMARY
           echo "- **CONFIG_RT_GROUP_SCHED**: DISABLED (BT fix!)" >> $GITHUB_STEP_SUMMARY
-          echo "- **GCC fixes**: -fcommon, put_user const, exfat compat, -Wno-implicit-function-declaration, C99 inline→static inline (5 mouse headers + nfnetlink_queue.h), nfnetlink_queue CT guard fix, RADIO_IRIS disabled" >> $GITHUB_STEP_SUMMARY
+          echo "- **CONFIG_RADIO_IRIS**: DISABLED (radio_hci_smd undefined)" >> $GITHUB_STEP_SUMMARY
+          echo "- **GCC fixes**: -fcommon, put_user const, exfat compat, -Wno-implicit-function-declaration, C99 inline→static inline (5 mouse headers + nfnetlink_queue.h), nfnetlink_queue CT guard fix" >> $GITHUB_STEP_SUMMARY
+          echo "- **boot.img**: Template-based (preserves Samsung QCDT + SEANDROIDENFORCE)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Flash" >> $GITHUB_STEP_SUMMARY
+          echo "### Flash (Heimdall - no root needed)" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "adb push boot.img /sdcard/" >> $GITHUB_STEP_SUMMARY
-          echo "adb shell su -c dd if=/sdcard/boot.img of=/dev/block/platform/msm_sdcc.1/by-name/boot" >> $GITHUB_STEP_SUMMARY
-          echo "adb reboot" >> $GITHUB_STEP_SUMMARY
+          echo "# Download boot.img from Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "# Boot tablet into Download mode (Vol Down + Power)" >> $GITHUB_STEP_SUMMARY
+          echo "heimdall flash --BOOT boot.img --no-reboot" >> $GITHUB_STEP_SUMMARY
+          echo "# Then reboot from Download mode" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Re-root with Magisk" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "# After confirmed boot, patch stock boot.img with Magisk app" >> $GITHUB_STEP_SUMMARY
+          echo "# Then flash Magisk-patched boot via Heimdall" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
