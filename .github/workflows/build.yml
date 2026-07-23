@@ -113,6 +113,8 @@ jobs:
           fi
 
       - name: Create boot.img
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 << 'PYEOF2'
           import struct, os, urllib.request, base64, json
