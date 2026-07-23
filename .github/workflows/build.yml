@@ -24,10 +24,10 @@ jobs:
           sed -i 's/-Werror-implicit-function-declaration/-Wno-implicit-function-declaration/g' Makefile
           sed -i 's/-Werror=implicit-function-declaration/-Wno-implicit-function-declaration/g' Makefile
 
-          echo "=== 2. Add -fcommon to fix multiple definition errors (GCC 10+ default -fno-common) ==="
-          sed -i '/^KBUILD_CFLAGS.*:=/s/$/ -fcommon/' Makefile
+          echo "=== 2. Change -fno-common to -fcommon (fixes multiple definition errors, GCC 10+ default) ==="
+          sed -i 's/-fno-common/-fcommon/g' Makefile
 
-          echo "=== 3. Fix put_user() register const asm() bug (GCC 8+, see gcc bugzilla 85745) ==="
+          echo "=== 3. Fix put_user() register const asm() bug (GCC 8+, gcc bugzilla 85745) ==="
           sed -i 's/register const typeof(\*(p)) __r2 asm("r2") = (x);/register typeof(*(p)) __r2 asm("r2") = (x);/' \
             arch/arm/include/asm/uaccess.h
 
@@ -36,6 +36,8 @@ jobs:
           grep -n 'implicit-function-declaration' Makefile
           grep -n 'fcommon' Makefile
           grep -n 'register.*typeof.*__r2' arch/arm/include/asm/uaccess.h
+          echo "Makefile line 370-376:"
+          sed -n '370,376p' Makefile
 
       - name: Disable CONFIG_RT_GROUP_SCHED in defconfig
         run: |
@@ -58,8 +60,6 @@ jobs:
           grep 'RT_GROUP_SCHED' .config || echo "not set (good!)"
           echo "=== CONFIG_OF ==="
           grep '^CONFIG_OF=' .config || echo "WARNING: not set"
-          echo "=== CONFIG_MSM_SMD ==="
-          grep '^CONFIG_MSM_SMD=' .config || echo "WARNING: not set"
 
       - name: Build kernel
         run: |
