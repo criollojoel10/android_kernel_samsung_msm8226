@@ -21,63 +21,73 @@ jobs:
       - name: Patch kernel for modern GCC
         run: |
           sed -i 's/-Werror-implicit-function-declaration/-Wno-implicit-function-declaration/g' Makefile
-          echo "Patched Makefile: removed -Werror-implicit-function-declaration"
-          grep -n 'implicit-function-declaration' Makefile
+          echo "Patched Makefile: -Werror-implicit-function-declaration -> -Wno-implicit-function-declaration"
+          sed -i 's/-Werror=implicit-function-declaration/-Wno-implicit-function-declaration/g' Makefile
+          echo "Patched Makefile: -Werror=implicit-function-declaration -> -Wno-implicit-function-declaration"
 
-      - name: Verify no CONFIG_RT_GROUP_SCHED
+      - name: Verify no CONFIG_RT_GROUP_SCHED in defconfig
         run: |
-          grep -i "RT_GROUP_SCHED" arch/arm/configs/matisse3g_defconfig && \
-            echo "WARNING: RT_GROUP_SCHED found!" || \
-            echo "OK: RT_GROUP_SCHED not in defconfig"
+          echo "=== msm8226-sec_defconfig ==="
+          grep -n "RT_GROUP_SCHED" arch/arm/configs/msm8226-sec_defconfig || echo "not found"
+          echo ""
+          echo "=== matisse3g_defconfig ==="
+          grep -n "RT_GROUP_SCHED" arch/arm/configs/matisse3g_defconfig || echo "not found"
 
       - name: Configure kernel
         run: |
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
-          make matisse3g_defconfig
-          echo "=== Key config values ==="
-          grep -E 'OF_FLATTREE|OF_EARLY|RT_GROUP_SCHED|PREEMPT|SOUND|SND' .config || true
+          make msm8226-sec_defconfig \
+            VARIANT_DEFCONFIG=msm8228-sec_atlantic3geur_defconfig \
+            SELINUX_DEFCONFIG=selinux_defconfig
+          echo "=== CONFIG_RT_GROUP_SCHED in .config ==="
+          grep "RT_GROUP_SCHED" .config || echo "not found (good!)"
+          echo ""
+          echo "=== Key configs ==="
+          grep -E 'CONFIG_ARCH_MSM8226|CONFIG_MSM_SMD|CONFIG_SND|CONFIG_BT' .config | head -20
+
+      - name: Disable RT_GROUP_SCHED in .config
+        run: |
+          sed -i 's/CONFIG_RT_GROUP_SCHED=y/# CONFIG_RT_GROUP_SCHED is not set/' .config
+          echo "After patch:"
+          grep "RT_GROUP_SCHED" .config || echo "RT_GROUP_SCHED disabled"
+          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- olddefconfig
 
       - name: Build kernel
         run: |
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
-          make -j$(nproc) zImage 2>&1 | tee /tmp/build.log
-          echo "Build exit code: ${PIPESTATUS[0]}"
-          test ${PIPESTATUS[0]} -eq 0
+          make -j$(nproc) 2>&1 | tee /tmp/build.log
+          BUILDRC=${PIPESTATUS[0]}
+          echo "Build exit code: $BUILDRC"
+          if [ "$BUILDRC" -ne 0 ]; then
+            echo "=== ERRORS ==="
+            grep -i 'error:' /tmp/build.log | grep -v '.gitignore' | tail -20
+            exit 1
+          fi
 
-      - name: Find kernel image
+      - name: Verify kernel image
         run: |
-          echo "=== arch/arm/boot/ ==="
-          ls -la arch/arm/boot/
-          echo ""
           echo "=== Check for kernel image ==="
-          if [ -f arch/arm/boot/Image ]; then
-            echo "Found Image: $(wc -c < arch/arm/boot/Image) bytes"
-          elif [ -f arch/arm/boot/zImage ]; then
+          if [ -f arch/arm/boot/zImage ]; then
             echo "Found zImage: $(wc -c < arch/arm/boot/zImage) bytes"
+          elif [ -f arch/arm/boot/Image ]; then
+            echo "Found Image: $(wc -c < arch/arm/boot/Image) bytes"
           else
             echo "ERROR: No kernel image found!"
-            grep -i 'error:' /tmp/build.log | head -10
+            ls -la arch/arm/boot/
             exit 1
           fi
 
       - name: Create boot.img
         run: |
-          if [ -f arch/arm/boot/Image ]; then
-            KERNEL_PATH=arch/arm/boot/Image
-          else
-            KERNEL_PATH=arch/arm/boot/zImage
-          fi
-          echo "Using: $KERNEL_PATH ($(wc -c < $KERNEL_PATH) bytes)"
-
           python3 << 'PYEOF2'
           import struct, os, urllib.request, base64, json
 
-          if os.path.exists('arch/arm/boot/Image'):
-              kernel_path = 'arch/arm/boot/Image'
-          else:
+          if os.path.exists('arch/arm/boot/zImage'):
               kernel_path = 'arch/arm/boot/zImage'
+          else:
+              kernel_path = 'arch/arm/boot/Image'
 
           with open(kernel_path, 'rb') as f:
               kernel = f.read()
@@ -152,7 +162,8 @@ jobs:
           echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Kernel**: matisse3g (ARM32, Snapdragon 400)" >> $GITHUB_STEP_SUMMARY
-          echo "- **CONFIG_RT_GROUP_SCHED**: NOT SET (BT fix!)" >> $GITHUB_STEP_SUMMARY
+          echo "- **CONFIG_RT_GROUP_SCHED**: DISABLED (BT fix!)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Defconfig**: msm8226-sec_defconfig + variant + selinux" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Flash" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
