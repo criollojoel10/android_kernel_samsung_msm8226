@@ -65,8 +65,16 @@ jobs:
           echo "=== Disable RADIO_IRIS (radio_hci_smd_init undefined - transport is module, radio-iris is built-in) ==="
           sed -i 's/^CONFIG_RADIO_IRIS=y/# CONFIG_RADIO_IRIS is not set/' \
             arch/arm/configs/msm8226-sec_defconfig
+          echo "=== Enable PSTORE for crash log capture ==="
+          echo "CONFIG_PSTORE=y" >> arch/arm/configs/msm8226-sec_defconfig
+          echo "CONFIG_PSTORE_CONSOLE=y" >> arch/arm/configs/msm8226-sec_defconfig
+          echo "CONFIG_PSTORE_PMSG=y" >> arch/arm/configs/msm8226-sec_defconfig
+          echo "CONFIG_PSTORE_RAM=y" >> arch/arm/configs/msm8226-sec_defconfig
+          echo "=== Change PANIC_TIMEOUT from 5 to -1 (hang forever on panic) ==="
+          sed -i 's/^CONFIG_PANIC_TIMEOUT=5/CONFIG_PANIC_TIMEOUT=-1/' \
+            arch/arm/configs/msm8226-sec_defconfig
           echo "Verify:"
-          grep -n 'RT_GROUP_SCHED\|RADIO_IRIS' arch/arm/configs/msm8226-sec_defconfig
+          grep -n 'RT_GROUP_SCHED\|RADIO_IRIS\|PSTORE\|PANIC_TIMEOUT' arch/arm/configs/msm8226-sec_defconfig
 
       - name: Configure kernel
         run: |
@@ -86,6 +94,10 @@ jobs:
           grep 'NF_CONNTRACK=' .config || echo "not set"
           echo "=== NETFILTER_NETLINK_QUEUE_CT ==="
           grep 'NETFILTER_NETLINK_QUEUE_CT' .config || echo "not set"
+          echo "=== PSTORE ==="
+          grep 'PSTORE' .config || echo "not set"
+          echo "=== PANIC_TIMEOUT ==="
+          grep 'PANIC_TIMEOUT' .config || echo "not set"
 
       - name: Build kernel
         run: |
@@ -115,13 +127,9 @@ jobs:
       - name: Create boot.img (template-based)
         run: |
           python3 << 'PYEOF2'
-          import struct, math, os
+          import struct, os
 
-          TEMPLATE = 'boot/original-boot.img'
-
-          with open(TEMPLATE, 'rb') as f:
-              orig = f.read()
-
+          # Get kernel from CI build
           if os.path.exists('arch/arm/boot/zImage'):
               kernel_path = 'arch/arm/boot/zImage'
           else:
@@ -129,36 +137,69 @@ jobs:
 
           with open(kernel_path, 'rb') as f:
               new_kernel = f.read()
+          print(f'New kernel: {len(new_kernel)} bytes')
 
-          page = 2048
-          kernel_size_orig = struct.unpack('<I', orig[8:12])[0]
-          ramdisk_size_orig = struct.unpack('<I', orig[16:20])[0]
-          ramdisk_padded = math.ceil(ramdisk_size_orig / page) * page
-          new_kernel_padded = math.ceil(len(new_kernel) / page) * page
+          # Load original boot.img as template (preserves QCDT + SEANDROIDENFORCE + ramdisk)
+          with open('boot/original-boot.img', 'rb') as f:
+              orig = bytearray(f.read())
+          print(f'Original boot.img: {len(orig)} bytes')
 
-          orig_ramdisk_start = page + math.ceil(kernel_size_orig / page) * page
-          orig_qcdt_start = orig_ramdisk_start + ramdisk_padded
+          page_size = struct.unpack('<I', orig[36:40])[0]  # 2048
+          orig_kernel_size = struct.unpack('<I', orig[8:12])[0]
+          orig_ramdisk_size = struct.unpack('<I', orig[16:20])[0]
 
-          ramdisk_data = orig[orig_ramdisk_start:orig_ramdisk_start + ramdisk_size_orig]
-          qcdt_and_rest = orig[orig_qcdt_start:]
+          # Calculate original layout
+          orig_kernel_pages = (orig_kernel_size + page_size - 1) // page_size
+          orig_ramdisk_pages = (orig_ramdisk_size + page_size - 1) // page_size
+          orig_ramdisk_offset = page_size + orig_kernel_pages * page_size
+          orig_qcdt_offset = orig_ramdisk_offset + orig_ramdisk_pages * page_size
 
-          new_boot = bytearray()
-          header = bytearray(orig[:page])
-          header[8:12] = struct.pack('<I', len(new_kernel))
-          new_boot += header
-          new_boot += new_kernel + b'\x00' * (new_kernel_padded - len(new_kernel))
-          new_boot += ramdisk_data + b'\x00' * (ramdisk_padded - len(ramdisk_data))
-          new_boot += qcdt_and_rest
+          # Extract ramdisk and QCDT+tail from original
+          ramdisk_data = orig[orig_ramdisk_offset:orig_ramdisk_offset + orig_ramdisk_size]
+          qcdt_data = orig[orig_qcdt_offset:]
+          print(f'Original: kernel={orig_kernel_size} ({orig_kernel_pages} pages), ramdisk={orig_ramdisk_size} ({orig_ramdisk_pages} pages), QCDT+tail={len(qcdt_data)}')
+
+          # Build new layout
+          new_kernel_pages = (len(new_kernel) + page_size - 1) // page_size
+          new_ramdisk_offset = page_size + new_kernel_pages * page_size
+          new_qcdt_offset = new_ramdisk_offset + orig_ramdisk_pages * page_size
+          new_total = new_qcdt_offset + len(qcdt_data)
+          print(f'New: kernel={len(new_kernel)} ({new_kernel_pages} pages), ramdisk at {new_ramdisk_offset}, QCDT at {new_qcdt_offset}, total={new_total}')
+
+          # Build new boot.img
+          new_boot = bytearray(new_total)
+
+          # Header: copy from original, update kernel size and cmdline
+          header = bytearray(orig[:page_size])
+          struct.pack_into('<I', header, 8, len(new_kernel))
+
+          cmdline = b'androidboot.hardware=qcom user_debug=23 msm_rtb.filter=0x37 zcache.enabled=1 zcache.compressor=lz4 buildvariant=userdebug androidboot.selinux=permissive androidboot.init_fatal_panic=true panic=60 loglevel=8 ignore_loglevel pstore.ramoops.mem_address=0x3F000000 pstore.ramoops.mem_size=0x100000 pstore.record_size=0x20000 pstore.console_size=0x40000'
+          cmdline = cmdline + b'\x00' * (512 - len(cmdline))
+          header[64:64+512] = cmdline
+
+          new_boot[:page_size] = header
+
+          # New kernel (padded)
+          padded_kernel = new_kernel + b'\x00' * (new_kernel_pages * page_size - len(new_kernel))
+          new_boot[page_size:page_size + len(padded_kernel)] = padded_kernel
+
+          # Ramdisk (at new offset, same content)
+          padded_ramdisk = ramdisk_data + b'\x00' * (orig_ramdisk_pages * page_size - len(ramdisk_data))
+          new_boot[new_ramdisk_offset:new_ramdisk_offset + len(padded_ramdisk)] = padded_ramdisk
+
+          # QCDT+tail (SEANDROIDENFORCE etc)
+          new_boot[new_qcdt_offset:new_qcdt_offset + len(qcdt_data)] = qcdt_data
+
+          # Verify
+          assert new_boot[:8] == b'ANDROID!', 'Bad magic!'
+          assert new_boot[new_qcdt_offset:new_qcdt_offset+4] == b'QCDT', 'Bad QCDT!'
+          assert new_boot[-16:] == b'SEANDROIDENFORCE', 'No SEANDROIDENFORCE!'
 
           with open('boot.img', 'wb') as f:
               f.write(new_boot)
 
-          print(f'New kernel: {len(new_kernel)} bytes')
-          print(f'Original ramdisk: {ramdisk_size_orig} bytes')
-          print(f'QCDT+tail: {len(qcdt_and_rest)} bytes')
-          print(f'boot.img: {len(new_boot)} bytes ({len(new_boot) // 1024} KB)')
-          print(f'QCDT magic: {bytes(new_boot[page + new_kernel_padded + ramdisk_padded:page + new_kernel_padded + ramdisk_padded + 4])}')
-          print(f'Last 16: {bytes(new_boot[-16:])}')
+          print(f'boot.img: {len(new_boot)} bytes')
+          print('Verification: ANDROID magic OK, QCDT OK, SEANDROIDENFORCE OK')
           PYEOF2
 
           ls -la boot.img
@@ -183,21 +224,15 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Kernel**: matisse3g (ARM32, Snapdragon 400)" >> $GITHUB_STEP_SUMMARY
           echo "- **CONFIG_RT_GROUP_SCHED**: DISABLED (BT fix!)" >> $GITHUB_STEP_SUMMARY
-          echo "- **CONFIG_RADIO_IRIS**: DISABLED (radio_hci_smd undefined)" >> $GITHUB_STEP_SUMMARY
-          echo "- **GCC fixes**: -fcommon, put_user const, exfat compat, -Wno-implicit-function-declaration, C99 inline→static inline (5 mouse headers + nfnetlink_queue.h), nfnetlink_queue CT guard fix" >> $GITHUB_STEP_SUMMARY
-          echo "- **boot.img**: Template-based (preserves Samsung QCDT + SEANDROIDENFORCE)" >> $GITHUB_STEP_SUMMARY
+          echo "- **CONFIG_PSTORE**: ENABLED (crash log capture!)" >> $GITHUB_STEP_SUMMARY
+          echo "- **CONFIG_PANIC_TIMEOUT**: -1 (hang on panic, no watchdog reset)" >> $GITHUB_STEP_SUMMARY
+          echo "- **cmdline**: init_fatal_panic=true, panic=60, pstore.ramoops, permissive" >> $GITHUB_STEP_SUMMARY
+          echo "- **GCC fixes**: -fcommon, put_user const, exfat compat, -Wno-implicit-function-declaration, C99 inline→static inline (5 mouse headers + nfnetlink_queue.h), nfnetlink_queue CT guard fix, RADIO_IRIS disabled" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Flash (Heimdall - no root needed)" >> $GITHUB_STEP_SUMMARY
+          echo "### Flash" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "# Download boot.img from Artifacts" >> $GITHUB_STEP_SUMMARY
-          echo "# Boot tablet into Download mode (Vol Down + Power)" >> $GITHUB_STEP_SUMMARY
-          echo "heimdall flash --BOOT boot.img --no-reboot" >> $GITHUB_STEP_SUMMARY
-          echo "# Then reboot from Download mode" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Re-root with Magisk" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "# After confirmed boot, patch stock boot.img with Magisk app" >> $GITHUB_STEP_SUMMARY
-          echo "# Then flash Magisk-patched boot via Heimdall" >> $GITHUB_STEP_SUMMARY
+          echo "adb push boot.img /sdcard/" >> $GITHUB_STEP_SUMMARY
+          echo "adb shell su -c dd if=/sdcard/boot.img of=/dev/block/platform/msm_sdcc.1/by-name/boot" >> $GITHUB_STEP_SUMMARY
+          echo "adb reboot" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 

@@ -16,26 +16,26 @@ int nfqnl_ct_put(struct sk_buff *skb, struct nf_conn *ct,
 void nfqnl_ct_seq_adjust(struct sk_buff *skb, struct nf_conn *ct,
 			 enum ip_conntrack_info ctinfo, int diff);
 #else
-inline struct nf_conn *
+static inline struct nf_conn *
 nfqnl_ct_get(struct sk_buff *entskb, size_t *size, enum ip_conntrack_info *ctinfo)
 {
 	return NULL;
 }
 
-inline struct nf_conn *nfqnl_ct_parse(const struct sk_buff *skb,
+static inline struct nf_conn *nfqnl_ct_parse(const struct sk_buff *skb,
 				      const struct nlattr *attr,
 				      enum ip_conntrack_info *ctinfo)
 {
 	return NULL;
 }
 
-inline int
+static inline int
 nfqnl_ct_put(struct sk_buff *skb, struct nf_conn *ct, enum ip_conntrack_info ctinfo)
 {
 	return 0;
 }
 
-inline void nfqnl_ct_seq_adjust(struct sk_buff *skb, struct nf_conn *ct,
+static inline void nfqnl_ct_seq_adjust(struct sk_buff *skb, struct nf_conn *ct,
 				enum ip_conntrack_info ctinfo, int diff)
 {
 }
