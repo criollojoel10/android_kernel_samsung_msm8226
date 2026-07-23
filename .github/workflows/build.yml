@@ -16,7 +16,15 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev make cpio python3
+          sudo apt-get install -y bc bison flex libssl-dev make cpio python3 wget libgmp10 libmpc3
+          echo "=== Install libmpfr4 for GCC 4.9 compatibility ==="
+          wget -q http://archive.ubuntu.com/ubuntu/pool/main/m/mpfr4/libmpfr4_3.1.4-1_amd64.deb -O /tmp/libmpfr4.deb
+          sudo dpkg -i /tmp/libmpfr4.deb
+          echo "libmpfr4 installed:"
+          ls -la /usr/lib/x86_64-linux-gnu/libmpfr.so.4*
+          echo "=== Verify GCC 4.9.4 can run ==="
+          TOOLCHAIN_DIR="$(pwd)/gcc-4.9.4-nolibc/arm-linux-gnueabi/bin"
+          "$TOOLCHAIN_DIR"/arm-linux-gnueabi-gcc --version | head -1
 
       - name: Install GCC 4.9.4 cross-compiler (kernel.org)
         run: |
