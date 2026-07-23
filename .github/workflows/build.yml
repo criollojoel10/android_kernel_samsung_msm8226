@@ -23,7 +23,7 @@ jobs:
           echo "=== Downloading GCC 4.9.4 from kernel.org crosstool ==="
           wget -q https://cdn.kernel.org/pub/tools/crosstool/files/bin/x86_64/4.9.4/x86_64-gcc-4.9.4-nolibc-arm-linux-gnueabi.tar.xz
           tar -xf x86_64-gcc-4.9.4-nolibc-arm-linux-gnueabi.tar.xz
-          TOOLCHAIN_DIR="$(pwd)/x86_64-gcc-4.9.4-nolibc-arm-linux-gnueabi/bin"
+          TOOLCHAIN_DIR="$(pwd)/gcc-4.9.4-nolibc/arm-linux-gnueabi/bin"
           echo "Toolchain binaries:"
           ls "$TOOLCHAIN_DIR"/ | head -10
           echo ""
