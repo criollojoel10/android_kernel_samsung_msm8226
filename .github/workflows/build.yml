@@ -38,14 +38,30 @@ jobs:
         run: |
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
-          make -j$(nproc) zImage Image 2>&1 | tail -50
+          make -j$(nproc) zImage 2>&1 | tee /tmp/build.log ; test ${PIPESTATUS[0]} -eq 0
+
+      - name: Build Image target
+        run: |
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          make -j$(nproc) Image 2>&1 | tee /tmp/build2.log ; test ${PIPESTATUS[0]} -eq 0
+
+      - name: List built images
+        run: |
+          echo "=== arch/arm/boot/ ==="
+          ls -la arch/arm/boot/ 2>/dev/null
+          echo ""
+          echo "=== compressed/ ==="
+          ls -la arch/arm/boot/compressed/ 2>/dev/null
+          echo ""
+          echo "=== vmlinux ==="
+          ls -la vmlinux 2>/dev/null
+          echo ""
+          echo "=== Top build errors ==="
+          grep -i 'error:' /tmp/build.log 2>/dev/null | head -10 || echo "no errors found in log"
 
       - name: Create boot.img
         run: |
-          echo "=== Available boot images ==="
-          ls -la arch/arm/boot/ 2>/dev/null
-          echo ""
-          echo "=== Check for Image or zImage ==="
           if [ -f arch/arm/boot/Image ]; then
             KERNEL=arch/arm/boot/Image
             echo "Using Image: $(wc -c < $KERNEL) bytes"
@@ -54,18 +70,20 @@ jobs:
             echo "Using zImage: $(wc -c < $KERNEL) bytes"
           else
             echo "ERROR: No kernel image found!"
-            ls -la arch/arm/boot/
+            echo "Build log errors:"
+            grep -i 'error\|fatal\|cannot\|fail' /tmp/build.log 2>/dev/null | head -20
             exit 1
           fi
 
-          python3 << BOOTIMG_EOF
+          python3 << 'PYEOF2'
           import struct, os, urllib.request, base64, json
 
-          kernel_path = os.environ.get('KERNEL_PATH', 'arch/arm/boot/Image')
-          if not os.path.exists(kernel_path):
+          if os.path.exists('arch/arm/boot/Image'):
+              kernel_path = 'arch/arm/boot/Image'
+          elif os.path.exists('arch/arm/boot/zImage'):
               kernel_path = 'arch/arm/boot/zImage'
-          if not os.path.exists(kernel_path):
-              raise FileNotFoundError(f'No kernel image found')
+          else:
+              raise FileNotFoundError('No kernel image found')
 
           with open(kernel_path, 'rb') as f:
               kernel = f.read()
@@ -117,7 +135,7 @@ jobs:
 
           total = page_size + kernel_padded + ramdisk_padded
           print(f'boot.img: {total} bytes ({total // 1024} KB)')
-          BOOTIMG_EOF
+          PYEOF2
 
           ls -la boot.img
 
@@ -139,7 +157,7 @@ jobs:
         run: |
           echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Config**: \`matisse3g_defconfig\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Config**: matisse3g_defconfig" >> $GITHUB_STEP_SUMMARY
           echo "- **CONFIG_RT_GROUP_SCHED**: NOT SET (fixed!)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Flash instructions" >> $GITHUB_STEP_SUMMARY
