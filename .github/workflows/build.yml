@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf bc bison flex libssl-dev make cpio python3 git
+          sudo apt-get install -y gcc-arm-linux-gnueabihf bc bison flex libssl-dev make cpio python3
 
       - name: Verify no CONFIG_RT_GROUP_SCHED
         run: |
@@ -51,77 +51,63 @@ jobs:
         run: |
           ls -la arch/arm/boot/Image
 
-          python3 -c "
-          import urllib.request, base64, json, os
+          python3 << 'BOOTIMG_EOF'
+          import struct, os, urllib.request, base64, json
 
+          # Download ramdisk from repo
           token = os.environ['GH_TOKEN']
-          url = 'https://api.github.com/repos/${{ github.repository }}/contents/boot/ramdisk.gz'
+          repo_url = os.environ.get('GITHUB_REPOSITORY', 'criollojoel10/android_kernel_samsung_msm8226')
+          url = f'https://api.github.com/repos/{repo_url}/contents/boot/ramdisk.gz'
           req = urllib.request.Request(url, headers={'Authorization': f'token {token}'})
           resp = urllib.request.urlopen(req)
           data = json.loads(resp.read())
-          content = base64.b64decode(data['content'])
-          with open('ramdisk.gz', 'wb') as f:
-              f.write(content)
-          print(f'Ramdisk: {len(content)} bytes')
-          "
-
-          python3 -c "
-          import struct, os
-
-          def align(value, page_size):
-              return (value + page_size - 1) & ~(page_size - 1)
-
-          page_size = 2048
-          kernel_offset = 0x8000
-          ramdisk_offset = 0x02000000
-          tags_offset = 0x01e00000
-          base = 0x00000000
-          cmdline = b'androidboot.hardware=qcom user_debug=23 msm_rtb.filter=0x37 zcache.enabled=1 zcache.compressor=lz4 buildvariant=userdebug'
+          ramdisk = base64.b64decode(data['content'])
+          print(f'Ramdisk: {len(ramdisk)} bytes')
 
           with open('arch/arm/boot/Image', 'rb') as f:
               kernel = f.read()
-          with open('ramdisk.gz', 'rb') as f:
-              ramdisk = f.read()
+          print(f'Kernel: {len(kernel)} bytes')
 
-          kernel_addr = base + kernel_offset
-          ramdisk_addr = base + ramdisk_offset
-          tags_addr = base + tags_offset
+          page_size = 2048
+          base_addr = 0x00000000
+          kernel_offset = 0x00008000
+          ramdisk_offset = 0x02000000
+          tags_offset = 0x01e00000
+          cmdline = b'androidboot.hardware=qcom user_debug=23 msm_rtb.filter=0x37 zcache.enabled=1 zcache.compressor=lz4 buildvariant=userdebug'
 
-          kernel_size = len(kernel)
-          ramdisk_size = len(ramdisk)
+          def pad(value):
+              return (value + page_size - 1) & ~(page_size - 1)
 
-          kernel_pages = align(kernel_size, page_size)
-          ramdisk_pages = align(ramdisk_size, page_size)
+          kernel_padded = pad(len(kernel))
+          ramdisk_padded = pad(len(ramdisk))
 
           header = bytearray(page_size)
-          struct.pack_into('<I', header, 0, 0x414C4452)
-          struct.pack_into('<I', header, 4, 1)
-          struct.pack_into('<I', header, 8, kernel_size)
-          struct.pack_into('<I', header, 12, kernel_addr)
-          struct.pack_into('<I', header, 16, ramdisk_size)
-          struct.pack_into('<I', header, 20, ramdisk_addr)
-          struct.pack_into('<I', header, 24, 0)
-          struct.pack_into('<I', header, 28, 0)
-          struct.pack_into('<I', header, 32, tags_addr)
+          header[0:8] = b'ANDROID!'
+          struct.pack_into('<I', header, 8, len(kernel))
+          struct.pack_into('<I', header, 12, base_addr + kernel_offset)
+          struct.pack_into('<I', header, 16, len(ramdisk))
+          struct.pack_into('<I', header, 20, base_addr + ramdisk_offset)
+          struct.pack_into('<I', header, 24, 0)   # second_size
+          struct.pack_into('<I', header, 28, 0)   # second_addr
+          struct.pack_into('<I', header, 32, base_addr + tags_offset)
           struct.pack_into('<I', header, 36, page_size)
-          struct.pack_into('<I', header, 40, 0)
-          struct.pack_into('<I', header, 44, 0)
+          struct.pack_into('<I', header, 40, 0)   # header_version
+          struct.pack_into('<I', header, 44, 0)   # os_version
           header[48:64] = b'SM-T531\x00'
           header[64:64+len(cmdline)] = cmdline
-          header[2048-64:2048] = b'ANDROID!'
 
           with open('boot.img', 'wb') as out:
               out.write(header)
               out.write(kernel)
-              out.write(b'\x00' * (kernel_pages - kernel_size))
+              out.write(b'\x00' * (kernel_padded - len(kernel)))
               out.write(ramdisk)
-              out.write(b'\x00' * (ramdisk_pages - ramdisk_size))
+              out.write(b'\x00' * (ramdisk_padded - len(ramdisk)))
 
-          total = page_size + kernel_pages + ramdisk_pages
-          print(f'boot.img created: {total} bytes')
-          print(f'  kernel: {kernel_size} bytes ({kernel_pages} pages)')
-          print(f'  ramdisk: {ramdisk_size} bytes ({ramdisk_pages} pages)')
-          "
+          total = page_size + kernel_padded + ramdisk_padded
+          print(f'boot.img: {total} bytes ({total // 1024} KB)')
+          print(f'  kernel: {len(kernel)} -> {kernel_padded} bytes')
+          print(f'  ramdisk: {len(ramdisk)} -> {ramdisk_padded} bytes')
+          BOOTIMG_EOF
 
           ls -la boot.img
 
@@ -149,10 +135,6 @@ jobs:
           echo "- **CONFIG_RT_GROUP_SCHED**: NOT SET (fixed!)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Flash instructions" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "fastboot flash boot boot.img" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "Or via adb:" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "adb push boot.img /sdcard/" >> $GITHUB_STEP_SUMMARY
           echo "adb shell su -c 'dd if=/sdcard/boot.img of=/dev/block/platform/msm_sdcc.1/by-name/boot'" >> $GITHUB_STEP_SUMMARY
