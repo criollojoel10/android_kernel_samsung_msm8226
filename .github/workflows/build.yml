@@ -35,6 +35,9 @@ jobs:
           sed -i 's/#if LINUX_VERSION_CODE < KERNEL_VERSION(3,5,0)/#if 0 \/\* removed: functions already in 3.4 \*\//' \
             fs/exfat/exfat_super.c
 
+          echo "=== 5. Fix f_mtp_samsung.c: .descriptors -> .fs_descriptors ==="
+          sed -i 's/\.descriptors = /\.fs_descriptors = /g' drivers/usb/gadget/f_mtp_samsung.c
+
           echo ""
           echo "Verification:"
           grep -n 'fcommon' Makefile | head -3
