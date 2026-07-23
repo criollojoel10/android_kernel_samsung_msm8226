@@ -16,46 +16,32 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf bc bison flex libssl-dev make cpio python3
+          sudo apt-get install -y bc bison flex libssl-dev make cpio python3
 
-      - name: Patch kernel for modern GCC
+      - name: Install Linaro GCC 4.9.4 toolchain
         run: |
-          echo "=== 1. Remove -Werror-implicit-function-declaration ==="
-          sed -i 's/-Werror-implicit-function-declaration/-Wno-implicit-function-declaration/g' Makefile
-          sed -i 's/-Werror=implicit-function-declaration/-Wno-implicit-function-declaration/g' Makefile
+          echo "=== Downloading Linaro GCC 4.9.4 (same era as original Samsung kernel) ==="
+          wget -q https://releases.linaro.org/components/toolchain/binaries/4.9-2017.01/arm-linux-gnueabihf/gcc-linaro-4.9.4-2017.01-x86_64_arm-linux-gnueabihf.tar.xz
+          tar -xf gcc-linaro-4.9.4-2017.01-x86_64_arm-linux-gnueabihf.tar.xz
+          echo "$(pwd)/gcc-linaro-4.9.4-2017.01-x86_64_arm-linux-gnueabihf/bin" >> $GITHUB_PATH
+          echo "=== Toolchain installed ==="
+          arm-linux-gnueabihf-gcc --version | head -1
 
-          echo "=== 2. Change -fno-common to -fcommon (fixes multiple definition errors, GCC 10+ default) ==="
-          sed -i 's/-fno-common/-fcommon/g' Makefile
-
-          echo "=== 3. Fix put_user() register const asm() bug (GCC 8+, gcc bugzilla 85745) ==="
-          sed -i 's/register const typeof(\*(p)) __r2 asm("r2") = (x);/register typeof(*(p)) __r2 asm("r2") = (x);/' \
-            arch/arm/include/asm/uaccess.h
-
-          echo "=== 4. Fix exfat compat block: uid_eq etc already exist in kernel 3.4 ==="
+      - name: Patch Samsung source bugs (GCC 4.9 compatible)
+        run: |
+          echo "=== 1. Fix exfat compat block: uid_eq etc already exist in kernel 3.4 ==="
           sed -i 's/#if LINUX_VERSION_CODE < KERNEL_VERSION(3,5,0)/#if 0 \/\* removed: functions already in 3.4 \*\//' \
             fs/exfat/exfat_super.c
 
-          echo "=== 5. Fix f_mtp_samsung.c: .descriptors -> .fs_descriptors ==="
+          echo "=== 2. Fix f_mtp_samsung.c: .descriptors -> .fs_descriptors ==="
           sed -i 's/\.descriptors = /\.fs_descriptors = /g' drivers/usb/gadget/f_mtp_samsung.c
 
-          echo "=== 6. Fix msm8226.c: angle bracket include -> quote include ==="
-          sed -i 's|#include <qdsp6v2/msm-pcm-routing-v2.h>|#include "qdsp6v2/msm-pcm-routing-v2.h"|'             sound/soc/msm/msm8226.c
-
-          echo "=== 7. Fix C99 inline stubs in mouse headers (GCC 11 doesn't emit standalone inline copies) ==="
-          for hdr in drivers/input/mouse/sentelic.h drivers/input/mouse/lifebook.h drivers/input/mouse/trackpoint.h drivers/input/mouse/alps.h drivers/input/mouse/logips2pp.h; do
-            sed -i 's/^inline /static inline /g' "$hdr"
-          done
-
-          echo "=== 8. Fix nfqnl linker error: change guard + static inline stubs ==="
-          sed -i 's/#if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)/#ifdef CONFIG_NETFILTER_NETLINK_QUEUE_CT/' include/net/netfilter/nfnetlink_queue.h
-          sed -i 's/^inline /static inline /g' include/net/netfilter/nfnetlink_queue.h
+          echo "=== 3. Fix msm8226.c: angle bracket include -> quote include ==="
+          sed -i 's|#include <qdsp6v2/msm-pcm-routing-v2.h>|#include "qdsp6v2/msm-pcm-routing-v2.h"|' \
+            sound/soc/msm/msm8226.c
 
           echo ""
-          echo "Verification:"
-          grep -n 'fcommon' Makefile | head -3
-          grep -n 'register.*typeof.*__r2' arch/arm/include/asm/uaccess.h
-          grep -n 'static inline' drivers/input/mouse/sentelic.h drivers/input/mouse/lifebook.h
-          grep -n 'static inline\|CONFIG_NETFILTER_NETLINK_QUEUE_CT' include/net/netfilter/nfnetlink_queue.h
+          echo "Only 3 patches applied (Samsung source bugs, not compiler-related)"
 
       - name: Fix defconfig
         run: |
@@ -103,7 +89,7 @@ jobs:
         run: |
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
-          make -j$(nproc) CONFIG_NO_ERROR_ON_MISMATCH=y 2>&1 | tee /tmp/build.log
+          make -j$(nproc) 2>&1 | tee /tmp/build.log
           BUILDRC=${PIPESTATUS[0]}
           echo "Build exit code: $BUILDRC"
           if [ "$BUILDRC" -ne 0 ]; then
@@ -222,12 +208,13 @@ jobs:
         run: |
           echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Toolchain**: Linaro GCC 4.9.4 (matching original Samsung kernel compiler)" >> $GITHUB_STEP_SUMMARY
           echo "- **Kernel**: matisse3g (ARM32, Snapdragon 400)" >> $GITHUB_STEP_SUMMARY
           echo "- **CONFIG_RT_GROUP_SCHED**: DISABLED (BT fix!)" >> $GITHUB_STEP_SUMMARY
           echo "- **CONFIG_PSTORE**: ENABLED (crash log capture!)" >> $GITHUB_STEP_SUMMARY
           echo "- **CONFIG_PANIC_TIMEOUT**: -1 (hang on panic, no watchdog reset)" >> $GITHUB_STEP_SUMMARY
           echo "- **cmdline**: init_fatal_panic=true, panic=60, pstore.ramoops, permissive" >> $GITHUB_STEP_SUMMARY
-          echo "- **GCC fixes**: -fcommon, put_user const, exfat compat, -Wno-implicit-function-declaration, C99 inline→static inline (5 mouse headers + nfnetlink_queue.h), nfnetlink_queue CT guard fix, RADIO_IRIS disabled" >> $GITHUB_STEP_SUMMARY
+          echo "- **Patches**: 3 source bug fixes only (exfat compat, f_mtp_samsung, msm8226 include) - NO GCC 11 workarounds needed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Flash" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
@@ -235,4 +222,3 @@ jobs:
           echo "adb shell su -c dd if=/sdcard/boot.img of=/dev/block/platform/msm_sdcc.1/by-name/boot" >> $GITHUB_STEP_SUMMARY
           echo "adb reboot" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-
