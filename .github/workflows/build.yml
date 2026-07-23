@@ -27,17 +27,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-arm-linux-gnueabihf bc bison flex libssl-dev make cpio python3 git
 
-      - name: Install mkbootimg from AOSP
-        run: |
-          git clone https://android.googlesource.com/platform/system/tools/mkbootimg /tmp/mkbootimg
-          cd /tmp/mkbootimg
-          pip3 install -r requirements.txt
-          sudo python3 setup.py install
-          cd /
-          rm -rf /tmp/mkbootimg
-          which mkbootimg
-          mkbootimg --help 2>&1 | head -3 || echo "mkbootimg installed"
-
       - name: Verify no CONFIG_RT_GROUP_SCHED
         run: |
           grep -i "RT_GROUP_SCHED" arch/arm/configs/matisse3g_defconfig && \
@@ -58,13 +47,6 @@ jobs:
           export CROSS_COMPILE=arm-linux-gnueabihf-
           make -j$(nproc) zImage Image 2>&1 | tail -50
 
-      - name: Build kernel modules (optional)
-        run: |
-          export ARCH=arm
-          export CROSS_COMPILE=arm-linux-gnueabihf-
-          make -j$(nproc) modules 2>&1 | tail -20 || true
-        continue-on-error: true
-
       - name: Create boot.img
         run: |
           ls -la arch/arm/boot/Image
@@ -83,18 +65,63 @@ jobs:
           print(f'Ramdisk: {len(content)} bytes')
           "
 
-          mkbootimg \
-            --kernel arch/arm/boot/Image \
-            --ramdisk ramdisk.gz \
-            --base 0x00000000 \
-            --pagesize 2048 \
-            --kernel_offset 0x00008000 \
-            --ramdisk_offset 0x02000000 \
-            --tags_offset 0x01e00000 \
-            --cmdline "androidboot.hardware=qcom user_debug=23 msm_rtb.filter=0x37 zcache.enabled=1 zcache.compressor=lz4 buildvariant=userdebug" \
-            --os_version 13.0.0 \
-            --os_patch_level 2025-01 \
-            -o boot.img
+          python3 -c "
+          import struct, os
+
+          def align(value, page_size):
+              return (value + page_size - 1) & ~(page_size - 1)
+
+          page_size = 2048
+          kernel_offset = 0x8000
+          ramdisk_offset = 0x02000000
+          tags_offset = 0x01e00000
+          base = 0x00000000
+          cmdline = b'androidboot.hardware=qcom user_debug=23 msm_rtb.filter=0x37 zcache.enabled=1 zcache.compressor=lz4 buildvariant=userdebug'
+
+          with open('arch/arm/boot/Image', 'rb') as f:
+              kernel = f.read()
+          with open('ramdisk.gz', 'rb') as f:
+              ramdisk = f.read()
+
+          kernel_addr = base + kernel_offset
+          ramdisk_addr = base + ramdisk_offset
+          tags_addr = base + tags_offset
+
+          kernel_size = len(kernel)
+          ramdisk_size = len(ramdisk)
+
+          kernel_pages = align(kernel_size, page_size)
+          ramdisk_pages = align(ramdisk_size, page_size)
+
+          header = bytearray(page_size)
+          struct.pack_into('<I', header, 0, 0x414C4452)
+          struct.pack_into('<I', header, 4, 1)
+          struct.pack_into('<I', header, 8, kernel_size)
+          struct.pack_into('<I', header, 12, kernel_addr)
+          struct.pack_into('<I', header, 16, ramdisk_size)
+          struct.pack_into('<I', header, 20, ramdisk_addr)
+          struct.pack_into('<I', header, 24, 0)
+          struct.pack_into('<I', header, 28, 0)
+          struct.pack_into('<I', header, 32, tags_addr)
+          struct.pack_into('<I', header, 36, page_size)
+          struct.pack_into('<I', header, 40, 0)
+          struct.pack_into('<I', header, 44, 0)
+          header[48:64] = b'SM-T531\x00'
+          header[64:64+len(cmdline)] = cmdline
+          header[2048-64:2048] = b'ANDROID!'
+
+          with open('boot.img', 'wb') as out:
+              out.write(header)
+              out.write(kernel)
+              out.write(b'\x00' * (kernel_pages - kernel_size))
+              out.write(ramdisk)
+              out.write(b'\x00' * (ramdisk_pages - ramdisk_size))
+
+          total = page_size + kernel_pages + ramdisk_pages
+          print(f'boot.img created: {total} bytes')
+          print(f'  kernel: {kernel_size} bytes ({kernel_pages} pages)')
+          print(f'  ramdisk: {ramdisk_size} bytes ({ramdisk_pages} pages)')
+          "
 
           ls -la boot.img
 
