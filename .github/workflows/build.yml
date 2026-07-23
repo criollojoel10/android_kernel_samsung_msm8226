@@ -38,6 +38,9 @@ jobs:
           echo "=== 5. Fix f_mtp_samsung.c: .descriptors -> .fs_descriptors ==="
           sed -i 's/\.descriptors = /\.fs_descriptors = /g' drivers/usb/gadget/f_mtp_samsung.c
 
+          echo "=== 6. Fix msm8226.c: angle bracket include -> quote include ==="
+          sed -i 's|#include <qdsp6v2/msm-pcm-routing-v2.h>|#include "qdsp6v2/msm-pcm-routing-v2.h"|'             sound/soc/msm/msm8226.c
+
           echo ""
           echo "Verification:"
           grep -n 'fcommon' Makefile | head -3
