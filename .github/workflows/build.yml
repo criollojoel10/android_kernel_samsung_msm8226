@@ -60,8 +60,14 @@ jobs:
           sed -i 's|#include <qdsp6v2/msm-pcm-routing-v2.h>|#include "qdsp6v2/msm-pcm-routing-v2.h"|' \
             sound/soc/msm/msm8226.c
 
+          echo "=== 4. Fix multiple definition of restart_reason ==="
+          echo "  restart_reason defined in both restart.c:70 and sec_debug.c:735"
+          echo "  Make restart.c use extern (sec_debug.c is the real definition)"
+          sed -i 's/^void \*restart_reason;/extern void *restart_reason;/' \
+            arch/arm/mach-msm/restart.c
+
           echo ""
-          echo "Only 3 patches applied (Samsung source bugs, not compiler-related)"
+          echo "Patches applied (Samsung source bugs + duplicate symbol fix)"
 
       - name: Fix defconfig
         run: |
